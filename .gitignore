@@ -1,0 +1,31 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+*.log
+
+# Environments & secrets
+.env
+.venv/
+venv/
+.env.*
+
+# Databases
+*.sqlite
+*.db
+
+# Node / Vite
+node_modules/
+dist/
+
+# IDEs
+.vscode/
+.idea/
+
+# Project specifics
+backend/newsfaces.db
+backend/__pycache__/
