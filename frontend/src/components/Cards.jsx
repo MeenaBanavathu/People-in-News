@@ -3,13 +3,13 @@ import React, { useState } from "react"
 const Card = ({ card }) => {
   const [isFlipped, setIsFlipped] = useState(false)
   const [imageError, setImageError] = useState(false)
-  const [selected, setSelected] = useState(0) // which article is active
+  const [selected, setSelected] = useState(0) // tells which article is active
 
   const article = (card.articles && card.articles[selected]) || {}
 
   const handleTitleTap = (idx) => {
     setSelected(idx)
-    setIsFlipped(true) // flip to show summary for that title
+    setIsFlipped(true) // flip to show link & summary for that title
   }
 
   const handleCardClick = (e) => {
@@ -18,7 +18,7 @@ const Card = ({ card }) => {
   }
 
   return (
-    <div className="w-full h-[550px] perspective-1000" onClick={handleCardClick}>
+    <div className="w-full h-[700px] perspective-1000" onClick={handleCardClick}>
       <div
         className={`relative w-full h-full transition-transform duration-500 transform-style-3d cursor-pointer ${
           isFlipped ? "rotate-y-180" : ""
@@ -31,20 +31,20 @@ const Card = ({ card }) => {
           style={{ backfaceVisibility: "hidden" }}
         >
           <div className="flex items-center gap-3 mb-3">
-            <div className="w-10 h-10 rounded-full bg-gray-100 flex items-center justify-center text-sm font-semibold">
+            <div className="w-10 h-10 rounded-full bg-gray-300 flex items-center justify-center text-sm font-semibold">
               {card.name ? card.name.charAt(0) : "?"}
             </div>
             <h2 className="text-xl font-bold">{card.name}</h2>
           </div>
 
-          {/* Hero image for the selected article */}
+          {/* Person image for the selected article */}
           {imageError || !article.imageUrl ? (
-            <div className="w-full h-60 bg-gray-100 rounded-lg flex items-center justify-center mb-4">
+            <div className="w-full min-h-[220px] bg-gray-100 rounded-lg flex items-center justify-center mb-4">
               <p className="text-gray-500 text-center px-4">Image not available</p>
             </div>
           ) : (
             <img
-              className="w-full h-60 object-cover rounded-lg mb-4"
+              className="w-full min-h-[200px] object-cover rounded-lg mb-4"
               src={article.imageUrl}
               alt={article.title || "Article image"}
               onError={() => setImageError(true)}

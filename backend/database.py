@@ -4,13 +4,11 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
 import os
 
-# Use DATABASE_URL if present; otherwise default to local SQLite.
-# Examples:
 #   sqlite:///./newsfaces.db
 #   postgresql+psycopg://user:pass@localhost:5432/newsfaces
 SQLALCHEMY_DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./newsfaces.db")
 
-# For SQLite, need check_same_thread=False in dev.
+
 engine = create_engine(
     SQLALCHEMY_DATABASE_URL,
     connect_args={"check_same_thread": False} if SQLALCHEMY_DATABASE_URL.startswith("sqlite") else {},
@@ -19,7 +17,7 @@ engine = create_engine(
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-# FastAPI dependency: get a DB session per request and close it afterwards.
+# get a DB session per request and close it afterwards.
 def get_db():
     db = SessionLocal()
     try:

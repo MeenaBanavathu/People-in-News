@@ -29,3 +29,5 @@ dist/
 # Project specifics
 backend/newsfaces.db
 backend/__pycache__/
+backend/checkdb.py
+backend/delete_person.py

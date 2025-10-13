@@ -5,12 +5,13 @@ from typing import List, Optional
 from datetime import datetime
 from dotenv import load_dotenv, find_dotenv
 from sqlalchemy.orm import Session
-from sqlalchemy import select, desc, func, delete, text
+from sqlalchemy import select, desc, func, text
 import httpx
 import asyncio
 import os
 import json
 from image_fetch import generate_person_image
+from validators import is_valid_person_name
 
 
 from database import get_db, engine, Base
@@ -20,14 +21,18 @@ app = FastAPI(title="NewsFaces API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=["http://localhost:5173",
+                   "http://127.0.0.1:5173",
+                   ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Database simulation (replace with actual DB later)
 news_cards_db = []
+
+# REFRESH_INTERVAL_MIN = int(os.getenv("NEWS_REFRESH_INTERVAL_MIN", "10"))
+# SSE_HEARTBEAT_SEC = 30
 
 # Configuration
 
@@ -82,7 +87,7 @@ async def extract_people_and_generate_content(article: dict):
     "Task:\n"
     "- Read the article title, description and full content text.\n"
     "- Identify the person or people the article is PRIMARILY about (the central subject[s]).\n"
-    "- Use only explicitly named individuals; ignore authors/bylines and generic groups (e.g., 'officials', 'police', 'committee').\n"
+    "- Use only explicitly named individuals; ignore authors/bylines and generic groups (e.g., 'officials', 'police', 'committee', 'any government', 'taliban').\n"
     "- EXCLUDE any article whose main subject is not a person but about animals, companies, products, laws, teams, places, disasters, studies, discoveries, fossils.\n"
     "- If multiple people are equally central of the subject, include all of them by joining their full names with ',' in the name field.\n"
     "- INCLUDE articles where the article's title clearly centers on a person’s action/status/statement.\n"
@@ -210,6 +215,10 @@ async def process_news_pipeline():
                 name = name.strip()
                 if not name:
                     continue
+                if not is_valid_person_name(name):
+                    print(f"🚫 Invalid person name '{name}' in article {idx + 1}, skipping...")
+                    continue    
+                
                 image_url = await generate_person_image(name)
 
                 print(f"🎨 Generating image for {ai_content['name']}, {image_url}")
@@ -237,12 +246,11 @@ async def process_news_pipeline():
     news_cards_db = new_cards
     print(f"✨ Pipeline complete! Generated {len(new_cards)} cards")
 
-# utils: run pipeline, then ingest what was produced
+
 async def run_pipeline_and_ingest():
-    await process_news_pipeline()  # fills global news_cards_db with dicts
+    await process_news_pipeline()  
     db = next(get_db())
     try:
-        # Convert dicts -> Pydantic models expected by ingest_cards
         cards_models = [schemas.NewsCard(**c) for c in news_cards_db]
         if cards_models:
             ingest_cards_internal(cards_models, db)
@@ -251,11 +259,8 @@ async def run_pipeline_and_ingest():
 
 @app.on_event("startup")
 async def startup_event():
-    # run end-to-end in background on startup
     asyncio.create_task(run_pipeline_and_ingest())
 
-    
-    
 
 @app.get("/api/people-news", response_model=List[NewsCard])
 async def get_people_news():
@@ -283,13 +288,10 @@ async def health_check():
 def on_startup() -> None:
     Base.metadata.create_all(bind=engine)
 
-# --- Health/Root ---
 @app.get("/", tags=["meta"])
 def health():
     return {"ok": True, "service": "people-in-news", "version": "1.0.0"}
 
-# --- Ingest your existing cards array ---
-# @app.post("/ingest/cards", response_model=dict, tags=["ingest"])
 def ingest_cards_internal(cards: List[schemas.NewsCard], db: Session) -> dict:
     if not cards:
         raise HTTPException(status_code=400, detail="No cards provided.")
@@ -305,7 +307,6 @@ def get_people(
 ):
     stmt = select(models.Person).order_by(desc(models.Person.created_at)).limit(limit)
     if q:
-        # Case-insensitive contains (SQLite LIKE is case-insensitive by default; ok for dev)
         stmt = select(models.Person).where(models.Person.name.ilike(f"%{q}%")).order_by(desc(models.Person.created_at)).limit(limit)
     people = db.execute(stmt).scalars().all()
     return people
@@ -317,7 +318,6 @@ def get_people_cards(top: int = Query(3, ge=1, le=10), db: Session = Depends(get
     a = models.Article
     pa = models.PersonArticle
 
-    # row_number() over each person’s articles by newest published_at
     rn = func.row_number().over(
         partition_by=pa.person_id,
         order_by=(a.published_at.desc().nullslast(), a.created_at.desc())
@@ -364,7 +364,7 @@ def get_people_cards(top: int = Query(3, ge=1, le=10), db: Session = Depends(get
             "published_at": r.published_at.isoformat() if r.published_at else None,
         })
 
-    # optional: sort people by their latest article’s published_at desc
+    #sort people by their latest article’s published_at desc
     def latest_pub(card):
         first = card["articles"][0]["published_at"] if card["articles"] else None
         return first or ""
@@ -372,28 +372,7 @@ def get_people_cards(top: int = Query(3, ge=1, le=10), db: Session = Depends(get
 
     return ordered
 
-# --- Get a single person by id ---
-@app.get("/people/{person_id}", response_model=schemas.PersonResponse, tags=["people"])
-def get_person(person_id: int, db: Session = Depends(get_db)):
-    person = db.get(models.Person, person_id)
-    if not person:
-        raise HTTPException(status_code=404, detail="Person not found")
-    return person
-
-# --- Articles for a given person ---
-@app.get("/people/{person_id}/articles", response_model=List[schemas.ArticleResponse], tags=["articles"])
-def get_person_articles(
-    person_id: int,
-    limit: int = Query(50, ge=1, le=500),
-    db: Session = Depends(get_db),
-):
-    # Reuse the CRUD helper
-    if not db.get(models.Person, person_id):
-        raise HTTPException(status_code=404, detail="Person not found")
-    articles = crud.list_articles_for_person(db, person_id, limit=limit)
-    return articles
-
-# --- Latest articles across everyone (for a "feed") ---
+# --- Latest articles across everyone ---
 @app.get("/articles/latest", response_model=List[schemas.ArticleResponse], tags=["articles"])
 def get_latest_articles(
     limit: int = Query(50, ge=1, le=500),
@@ -408,19 +387,10 @@ def get_latest_articles(
     return articles
 
 # --- Lookup article by link (useful to check if present) ---
-@app.get("/articles/by-link", response_model=schemas.ArticleResponse, tags=["articles"])
-def get_article_by_link(link: str = Query(..., min_length=5), db: Session = Depends(get_db)):
-    stmt = select(models.Article).where(models.Article.link == link).limit(1)
-    article = db.execute(stmt).scalar_one_or_none()
-    if not article:
-        raise HTTPException(status_code=404, detail="Article not found")
-    return article
-
-
-@app.get("/debug/clear-db")  # not recommended; enable only if you must
-def clear_db(db=Depends(get_db)):
-    db.execute(text("DELETE FROM person_articles;"))
-    db.execute(text("DELETE FROM articles;"))
-    db.execute(text("DELETE FROM people;"))
-    db.commit()
-    return {"ok": True}
+# @app.get("/articles/by-link", response_model=schemas.ArticleResponse, tags=["articles"])
+# def get_article_by_link(link: str = Query(..., min_length=5), db: Session = Depends(get_db)):
+#     stmt = select(models.Article).where(models.Article.link == link).limit(1)
+#     article = db.execute(stmt).scalar_one_or_none()
+#     if not article:
+#         raise HTTPException(status_code=404, detail="Article not found")
+#     return article

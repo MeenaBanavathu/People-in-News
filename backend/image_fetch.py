@@ -3,10 +3,9 @@ import time
 import asyncio
 import httpx
 from typing import Optional, Dict, Tuple
+from validators import is_valid_person_name
 
-# ------------------------
-# Simple async-safe TTL cache
-# ------------------------
+
 _IMAGE_CACHE: Dict[str, Tuple[float, str]] = {}  # name_lower -> (expires_at, url)
 _IMAGE_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60      # 7 days
 _IMAGE_CACHE_LOCK = asyncio.Lock()
@@ -18,7 +17,7 @@ COMMONS_API = "https://commons.wikimedia.org/w/api.php"
 # Identify your app per Wikimedia's requirements:
 USER_AGENT = os.getenv(
     "WIKIMEDIA_USER_AGENT",
-    "PeopleNewsBot/1.0 (contact: youremail@example.com)"
+    "PeopleNewsBot/1.0 (contact: meenabanavatu44@gmail.com)"
 )
 
 def _avatar(person_name: str) -> str:
@@ -64,7 +63,7 @@ async def _fetch_wikipedia_primary_image(client: httpx.AsyncClient, person_name:
     pages = (data.get("query") or {}).get("pages") or {}
     if not pages:
         return None
-    # Pick the single best page (there should be at most one with gsrlimit=1)
+    
     for _, page in pages.items():
         # Prefer original if available, otherwise thumbnail
         original = (page.get("original") or {}).get("source")
@@ -129,17 +128,14 @@ async def _fetch_commons_image_search(client: httpx.AsyncClient, person_name: st
     return None
 
 async def generate_person_image(person_name: str) -> str:
-    """
-    Fetch a face/portrait image for the person via Wikipedia/Wikimedia.
-    Uses a local TTL cache to avoid repeated lookups.
-    Falls back to a neutral initials avatar if nothing found.
-    """
+    if not is_valid_person_name(person_name):
+        raise ValueError(f"🚫 Invalid person name: {person_name}")
+    
     # Cache check
     cached = await _get_cached(person_name)
     if cached:
         return cached
-
-    # Try Wikimedia sources
+    
     try:
         async with httpx.AsyncClient() as client:
             # 1) Wikipedia page primary image
@@ -152,12 +148,9 @@ async def generate_person_image(person_name: str) -> str:
                 await _set_cached(person_name, url)
                 return url
     except Exception as e:
-        # Log if you have logging enabled
         print("[Wikimedia] image fetch error:", e)
 
     
-
-    # Final fallback
     fallback = _avatar(person_name)
     await _set_cached(person_name, fallback)  # cache the fallback too
     return fallback

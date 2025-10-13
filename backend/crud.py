@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import select
 from datetime import datetime
 import models
-import schemas  # relies on your existing Pydantic schemas
+import schemas  
 from typing import Iterable
 
 # ---- Person helpers ----
