@@ -6,7 +6,7 @@ from datetime import datetime
 class NewsCard(BaseModel):
     id: str
     name: str
-    image_url: Optional[str] = None
+    image_url: str
     catchy_title: Optional[str] = None
     summary: Optional[str] = None
     link: str
@@ -16,7 +16,7 @@ class PersonResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
     name: str
-    image_url: Optional[str] = None
+    image_url: str
 
 class ArticleResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -25,10 +25,10 @@ class ArticleResponse(BaseModel):
     summary: str
     link: str
     source_name: Optional[str] = None
-    image_url: Optional[str] = None
     published_at: Optional[datetime] = None  
 
 class PersonNewsCard(BaseModel):
     id: int
     name: str
+    image_url: str
     articles: List[ArticleResponse]

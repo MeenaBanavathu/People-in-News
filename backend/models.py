@@ -1,4 +1,3 @@
-# app/models.py
 from sqlalchemy import (
     Integer, String, Text, DateTime, Boolean, ForeignKey, Index
 )
@@ -16,7 +15,7 @@ class Person(Base, TimestampMixin):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     # Person's canonical name (unique)
     name: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
-    image_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    image_url: Mapped[str] = mapped_column(String(1024), nullable=False)
 
     # Backrefs
     person_articles = relationship("PersonArticle", back_populates="person", cascade="all, delete-orphan")
@@ -25,13 +24,11 @@ class Article(Base, TimestampMixin):
     __tablename__ = "articles"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    # A short catchy title generated for UI
     title: Mapped[str] = mapped_column(String(512), nullable=False)
     summary: Mapped[str] = mapped_column(Text, nullable=False)
     link: Mapped[str] = mapped_column(String(1024), nullable=False, unique=True)  # Avoid duplicates
     source_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    image_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
 
     # Backrefs
     person_articles = relationship("PersonArticle", back_populates="article", cascade="all, delete-orphan")

@@ -1,7 +1,8 @@
-from fastapi import FastAPI, BackgroundTasks, Depends, HTTPException, Query
+from fastapi import FastAPI, BackgroundTasks, Depends, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Optional
+from fastapi.responses import StreamingResponse, JSONResponse
+from typing import List, Optional, Set
 from datetime import datetime
 from dotenv import load_dotenv, find_dotenv
 from sqlalchemy.orm import Session
@@ -10,10 +11,11 @@ import httpx
 import asyncio
 import os
 import json
+import time
+from contextlib import suppress
+
 from image_fetch import generate_person_image
 from validators import is_valid_person_name
-
-
 from database import get_db, engine, Base
 import crud, models, schemas
 
@@ -31,8 +33,9 @@ app.add_middleware(
 
 news_cards_db = []
 
-# REFRESH_INTERVAL_MIN = int(os.getenv("NEWS_REFRESH_INTERVAL_MIN", "10"))
-# SSE_HEARTBEAT_SEC = 30
+_run_lock = asyncio.Lock()
+_update_task: asyncio.Task | None = None
+_subscribers: Set[asyncio.Queue[str]] = set()
 
 # Configuration
 
@@ -42,14 +45,14 @@ def config() -> tuple[str, str]:
 
     news = os.getenv("NEWS_API_KEY", "")
     groq_key = os.getenv("GROQ_API_KEY", "")
-    google_key = os.getenv("GOOGLE_API_KEY", "")
-    google_cse = os.getenv("GOOGLE_CSE_ID", "")
+    REFRESH_INTERVAL_MIN = int(os.getenv("NEWS_REFRESH_INTERVAL_MIN", "10"))    
+    SSE_HEARTBEAT_SEC = int(os.getenv("SSE_HEARTBEAT_SEC", "30"))
 
-    missing = [name for name, val in [("NEWS_API_KEY", news), ("GROQ_API_KEY", groq_key), ("GOOGLE_API_KEY", google_key), ("GOOGLE_CSE_ID", google_cse)] if not val]
+    missing = [name for name, val in [("NEWS_API_KEY", news), ("GROQ_API_KEY", groq_key)] if not val]
     if missing:
         raise RuntimeError(f"Missing env var(s): {', '.join(missing)}")
 
-    return news, groq_key, google_key, google_cse
+    return news, groq_key
 
 
 class NewsCard(BaseModel):
@@ -87,21 +90,47 @@ async def extract_people_and_generate_content(article: dict):
     "Task:\n"
     "- Read the article title, description and full content text.\n"
     "- Identify the person or people the article is PRIMARILY about (the central subject[s]).\n"
-    "- Use only explicitly named individuals; ignore authors/bylines and generic groups (e.g., 'officials', 'police', 'committee', 'any government', 'taliban').\n"
-    "- EXCLUDE any article whose main subject is not a person but about animals, companies, products, laws, teams, places, disasters, studies, discoveries, fossils.\n"
-    "- If multiple people are equally central of the subject, include all of them by joining their full names with ',' in the name field.\n"
-    "- INCLUDE articles where the article's title clearly centers on a person’s action/status/statement.\n"
-    "- name should be the Full name of the main person(s), not just the first name or last name the article is about, do not include generic groups.\n"
+    "- Extract their FULL, PROPER NAMES using your knowledge.\n"
+    "\n"
+    "NAME EXTRACTION RULES:\n"
+    "- If article mentions 'Trump', output 'Donald Trump' (use full name)\n"
+    "- If article mentions 'Biden', output 'Joe Biden'\n"
+    "- If article mentions 'Modi', output 'Narendra Modi'\n"
+    "- Use your knowledge to expand partial names (last name only or first name only) to complete names\n"
+    "- For mononyms (people known by single name), use that single name: 'Madonna', 'Nani', 'Cher', 'Pele'\n"
+    "- For names with titles, extract only the name: 'Benjamin Netanyahu' not 'PM Netanyahu'\n"
+    "- If a person is mentioned multiple times with variations, consolidate to ONE full name\n"
+    "- If multiple people are equally central subjects, list ALL full names separated by commas\n"
+    "- If you cannot determine the full name or the person is truly unknown, skip the article\n"
+    "\n"
+    "STRICT EXCLUSION RULES - Do NOT include:\n"
+    "- Organizations, militias, or groups (e.g., 'Hamas', 'Taliban', 'US Army', 'FBI', 'police', 'committee')\n"
+    "- Job titles or roles without names (e.g., 'President', 'CEO', 'officials', 'spokesperson')\n"
+    "- Generic references (e.g., 'unknown', 'three men', 'a woman', 'suspects', 'victim', 'unidentified person')\n"
+    "- Nationalities or demographics (e.g., 'Americans', 'youth', 'citizens')\n"
+    "- Animals, companies, products, laws, teams, places, disasters, studies, discoveries, fossils, fictional characters\n"
+    "- Authors, bylines, or reporters (focus only on subjects of the article)\n"
+    "\n"
+    "INCLUDE articles where:\n"
+    "- The title/content clearly centers on a specific named person's action, status, or statement\n"
+    "- A named individual is the primary subject being discussed\n"
+    "\n"
+    "EXCLUDE articles where:\n"
+    "- NO specific person is identified as the main subject\n"
+    "- Only organizations, groups, or unnamed individuals are the focus\n"
+    "- The person cannot be identified with a proper name\n"
+    "\n"
     "Output rules:\n"
-    "- If NO qualifying person is present, do not include the article in the final output.\n"
-    "- Otherwise return STRICT JSON with keys: name, catchy_title, summary.\n"
+    "- If NO qualifying person is present, return null or empty response (do not fabricate output)\n"
+    "- Otherwise return STRICT JSON with keys: name, catchy_title, summary\n"
     "\n"
     "Style & constraints:\n"
-    "- name is the full name of the main person(s) the article is about.\n"
-    "- catchy_title should be less than 4 words, no emojis or quotes.\n"
-    "- summary is neutral, factual, 2–3 sentences.\n"
-    "- Output JSON ONLY, no extra text."
- )
+    "- name: Full proper name(s), comma-separated if multiple people. Use knowledge to expand partial names. Cannot be null, cannot be a group/organization.\n"
+    "- catchy_title: Less than 4 words, no emojis, no quotes, person-focused\n"
+    "- summary: Neutral, factual, 2–3 sentences about what the person did/said/experienced\n"
+    "\n"
+    "Output ONLY valid JSON, no extra text or explanation."
+)
 
 
     user_content = (
@@ -145,49 +174,10 @@ async def extract_people_and_generate_content(article: dict):
     if not name:
         return None
 
-    if len(catchy.split()) > 5:
-        catchy = " ".join(catchy.split()[:5])
+    # if len(catchy.split()) > 5:
+    #     catchy = " ".join(catchy.split()[:5])
 
     return {"name": name, "catchy_title": catchy, "summary": summary}       
-
-#async def generate_person_image(person_name: str) -> str:
-    """
-    Fetch a face image for the person via Google Programmable Search.
-    Falls back to a neutral initials avatar if nothing found.
-    """
-    # if not config()[2] or not config()[3]:
-    #     # Safe fallback if keys are missing
-    #     return f"https://ui-avatars.com/api/?name={person_name.replace(' ', '+')}&size=400&background=random"
-
-    # params = {
-    #     "key": config()[2],
-    #     "cx": config()[3],
-    #     "q": person_name,
-    #     "searchType": "image",
-    #     "imgType": "face",      # bias toward faces
-    #     "safe": "active",
-    #     "num": 1,               # try a few; we’ll pick the first viable
-    # }
-
-    # Uncomment when rate limit is fixed
-    # try:
-    #     async with httpx.AsyncClient(timeout=20) as client:
-    #         r = await client.get("https://www.googleapis.com/customsearch/v1", params=params)
-    #         r.raise_for_status()
-    #         items = r.json().get("items", []) or []
-    #         print(items)
-    #         # Pick the first reasonably-sized image
-    #         for it in items:
-    #             url = it.get("link")
-    #             if isinstance(url, str) and url.startswith("http"):
-    #                 return url
-    # except Exception as e:
-    #     print("[Google CSE] image fetch error:", e)
-
-    # Final fallback
-
-    #return f"https://ui-avatars.com/api/?name={person_name.replace(' ', '+')}&size=400&background=random"
-
 
 async def process_news_pipeline():
     """Main pipeline to process news and generate cards"""
@@ -205,7 +195,7 @@ async def process_news_pipeline():
             
             # Extract people and generate content
             ai_content = await extract_people_and_generate_content(article)
-            
+            print(f"Extracted content: {ai_content}")
             if not ai_content:
                 print(f"no person found in article {idx + 1}, skipping...")
                 continue
@@ -221,7 +211,7 @@ async def process_news_pipeline():
                 
                 image_url = await generate_person_image(name)
 
-                print(f"🎨 Generating image for {ai_content['name']}, {image_url}")
+                print(f"🎨 Generating image for {name}, {image_url}")
                 ai_content['name'] = name  # use individual name for the card
                 ai_content['image_url'] = image_url
                 
@@ -237,7 +227,7 @@ async def process_news_pipeline():
                 )
                 
                 new_cards.append(card.dict())
-                print(f"✅ Card created for {ai_content['name']}, {card}")
+                print(f"✅ Card created for {ai_content['name']}")
             
         except Exception as e:
             print(f"❌ Error processing article: {str(e)}")
@@ -257,9 +247,50 @@ async def run_pipeline_and_ingest():
     finally:
         db.close()
 
-@app.on_event("startup")
-async def startup_event():
-    asyncio.create_task(run_pipeline_and_ingest())
+async def _notify_update(payload: dict):
+    msg = json.dumps(payload, ensure_ascii=False)
+    dead = []
+    for q in list(_subscribers):
+        try:
+            await q.put(msg)
+        except Exception:
+            dead.append(q)
+    for q in dead:
+        _subscribers.discard(q)
+
+async def _sse_event_stream(request: Request, q: asyncio.Queue[str]):
+    try:
+        while True:
+            if await request.is_disconnected():
+                break
+            try:
+                msg = await asyncio.wait_for(q.get(), timeout=30)
+                yield f"event: news_update\ndata: {msg}\n\n"
+            except asyncio.TimeoutError:
+                yield ": keep-alive\n\n"
+    finally:
+        _subscribers.discard(q)
+
+@app.get("/events")
+async def events(request: Request):
+    #SSE endpoint for real-time updates
+    q: asyncio.Queue[str] = asyncio.Queue()
+    _subscribers.add(q)
+    return StreamingResponse(_sse_event_stream(request, q), media_type="text/event-stream")
+
+async def periodic_refresh():
+    await asyncio.sleep(10 * 60)
+    while True:
+        try:
+            async with _run_lock:
+                print("🔄 Starting periodic news refresh...")
+                await run_pipeline_and_ingest()
+                await _notify_update({"kind": "news_update", "ts": time.time()})
+                print("✅ News refresh complete.")
+        except Exception as e:
+            print("❌ Error during periodic refresh:", e)
+        await asyncio.sleep(10 * 60)
+
 
 
 @app.get("/api/people-news", response_model=List[NewsCard])
@@ -268,10 +299,16 @@ async def get_people_news():
     return news_cards_db
 
 @app.post("/api/refresh-news")
-async def refresh_news(background_tasks: BackgroundTasks):
-    """Manually trigger news refresh"""
-    background_tasks.add_task(process_news_pipeline)
-    return {"message": "News refresh started"}
+async def refresh_news():
+    """
+    Manually trigger a full run (pipeline + ingest) safely.
+    """
+    if _run_lock.locked():
+        return JSONResponse({"status": "busy"}, status_code=409)
+    async with _run_lock:
+        await run_pipeline_and_ingest()
+        await _notify_update({"kind": "news_update", "ts": time.time()})
+    return {"status": "ok", "cards": len(news_cards_db)}
 
 @app.get("/api/health")
 async def health_check():
@@ -281,6 +318,27 @@ async def health_check():
         "cards_count": len(news_cards_db),
         "timestamp": datetime.now().isoformat()
     }
+
+@app.on_event("startup")
+async def on_startup():
+    global _update_task
+    try:
+        async with _run_lock:
+            await run_pipeline_and_ingest()
+            await _notify_update({"kind": "news_update", "ts": time.time()})
+    except Exception as e:
+        print("❌ Error during startup initial run:", e)
+    _update_task = asyncio.create_task(periodic_refresh())
+    print("[startup] periodic refresh every 10 min")
+
+@app.on_event("shutdown")
+async def _shutdown():
+    global _update_task
+    if _update_task:
+        _update_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await _update_task
+    print("[shutdown] background task stopped")
 
 
 # --- Create tables on startup (dev only; use Alembic migrations in prod) ---
@@ -327,11 +385,11 @@ def get_people_cards(top: int = Query(3, ge=1, le=10), db: Session = Depends(get
         select(
             p.id.label("person_id"),
             p.name.label("person_name"),
+            p.image_url,
             a.id.label("article_id"),
             a.title,
             a.summary,
             a.link,
-            p.image_url,
             a.published_at,
             rn.label("rn"),
         )
@@ -353,6 +411,7 @@ def get_people_cards(top: int = Query(3, ge=1, le=10), db: Session = Depends(get
             cards[pid] = {
                 "id": pid,
                 "name": r.person_name,
+                "image_url": r.image_url,
                 "articles": [],
             }
         cards[pid]["articles"].append({
@@ -360,7 +419,6 @@ def get_people_cards(top: int = Query(3, ge=1, le=10), db: Session = Depends(get
             "title": r.title,
             "summary": r.summary,
             "link": r.link,
-            "image_url": r.image_url,
             "published_at": r.published_at.isoformat() if r.published_at else None,
         })
 
@@ -386,11 +444,20 @@ def get_latest_articles(
     articles = db.execute(stmt).scalars().all()
     return articles
 
-# --- Lookup article by link (useful to check if present) ---
-# @app.get("/articles/by-link", response_model=schemas.ArticleResponse, tags=["articles"])
-# def get_article_by_link(link: str = Query(..., min_length=5), db: Session = Depends(get_db)):
-#     stmt = select(models.Article).where(models.Article.link == link).limit(1)
-#     article = db.execute(stmt).scalar_one_or_none()
-#     if not article:
-#         raise HTTPException(status_code=404, detail="Article not found")
-#     return article
+@app.delete("/debug/people/by-name/{name}")
+def delete_person_by_name_sql(name: str, db = Depends(get_db)):
+    db.execute(text("""
+        DELETE FROM person_articles
+        WHERE person_id IN (SELECT id FROM people WHERE lower(name) = lower(:name));
+    """), {"name": name})
+
+    # Delete the person
+    res = db.execute(text("""
+        DELETE FROM people
+        WHERE lower(name) = lower(:name)
+    """), {"name": name})
+    if res.rowcount == 0:
+        raise HTTPException(status_code=404, detail=f"No person found with name: {name}")
+
+    db.commit()
+    return {"deleted": name}

@@ -38,14 +38,14 @@ const Card = ({ card }) => {
           </div>
 
           {/* Person image for the selected article */}
-          {imageError || !article.imageUrl ? (
+          {imageError || !card.imageUrl ? (
             <div className="w-full min-h-[220px] bg-gray-100 rounded-lg flex items-center justify-center mb-4">
               <p className="text-gray-500 text-center px-4">Image not available</p>
             </div>
           ) : (
             <img
               className="w-full min-h-[200px] object-cover rounded-lg mb-4"
-              src={article.imageUrl}
+              src={card.imageUrl}
               alt={article.title || "Article image"}
               onError={() => setImageError(true)}
             />
